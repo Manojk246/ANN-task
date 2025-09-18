@@ -2,93 +2,64 @@ import gradio as gr
 import pandas as pd
 import numpy as np
 from sklearn.model_selection import train_test_split
-from sklearn.preprocessing import PowerTransformer, RobustScaler, PolynomialFeatures
-from sklearn.feature_selection import SelectKBest, f_regression
-from sklearn.pipeline import Pipeline
+from sklearn.preprocessing import StandardScaler
 from tensorflow.keras.models import Sequential
 from tensorflow.keras.layers import Dense, Dropout
-from tensorflow.keras.optimizers import Adam
-from scikeras.wrappers import KerasRegressor
-from sklearn.model_selection import GridSearchCV
+from tensorflow.keras.utils import to_categorical
 
 # ---------------------------
-# Load and preprocess dataset
+# Load dataset
 # ---------------------------
-# Adjust the file path if needed
-try:
-    df = pd.read_csv("modified.csv")
-except FileNotFoundError:
-    print("The file 'modified.csv' was not found.")
-    exit()
+df = pd.read_csv("modified.csv")
 
-# Separate features (X) and target (y)
-X = df.drop(columns=['quality'])
-y = df['quality']
-feature_names = X.columns.tolist()
+X = df.drop("quality", axis=1).values
+y = df["quality"].values
+
+# Encode labels (wine qualities: 3–8)
+classes = sorted(df["quality"].unique())
+class_to_idx = {c: i for i, c in enumerate(classes)}
+y = np.array([class_to_idx[val] for val in y])
+
+num_classes = len(classes)
+y_cat = to_categorical(y, num_classes=num_classes)
 
 # Train-test split
-X_tr, X_te, y_tr, y_te = train_test_split(X, y, test_size=0.2, random_state=42)
+X_train, X_test, y_train, y_test = train_test_split(X, y_cat, test_size=0.2, random_state=42)
+
+# Scaling
+scaler = StandardScaler()
+X_train = scaler.fit_transform(X_train)
+X_test = scaler.transform(X_test)
 
 # ---------------------------
-# ANN Model Definition
+# Build ANN model
 # ---------------------------
-def build_ann(hidden_units=64, learning_rate=0.001, dropout_rate=0.2, n_features=None):
+def build_model():
     model = Sequential()
-    model.add(Dense(hidden_units, activation="relu", input_shape=(n_features,)))
-    model.add(Dropout(dropout_rate))
-    model.add(Dense(hidden_units // 2, activation="relu"))
-    model.add(Dense(1, activation="linear"))
-    model.compile(optimizer=Adam(learning_rate=learning_rate), loss="mse")
+    model.add(Dense(128, input_dim=X_train.shape[1], activation="relu"))
+    model.add(Dropout(0.3))
+    model.add(Dense(64, activation="relu"))
+    model.add(Dropout(0.3))
+    model.add(Dense(num_classes, activation="softmax"))
     return model
 
-# ---------------------------
-# Pipeline and GridSearchCV
-# ---------------------------
-select_k = 10 
-pipe = Pipeline([
-    ("power", PowerTransformer(method="yeo-johnson")),
-    ("scale", RobustScaler()),
-    ("poly", PolynomialFeatures(degree=2, include_bias=False)),
-    ("select", SelectKBest(score_func=f_regression, k=select_k)),
-    ("ann", KerasRegressor(
-        model=build_ann,
-        model__n_features=select_k,
-        verbose=0,
-        batch_size=32,
-        epochs=50
-    ))
-])
-
-param_grid = {
-    "ann__model__hidden_units": [64],
-    "ann__model__learning_rate": [0.001],
-    "ann__model__dropout_rate": [0.1],
-    "ann__batch_size": [32],
-    "ann__epochs": [50],
-}
-
-search = GridSearchCV(
-    estimator=pipe,
-    param_grid=param_grid,
-    scoring="r2",
-    cv=3,
-    n_jobs=-1
-)
-
-print("Starting model training...")
-search.fit(X_tr, y_tr)
-print("Model training complete.")
+model = build_model()
+model.compile(optimizer="adam", loss="categorical_crossentropy", metrics=["accuracy"])
+model.fit(X_train, y_train, epochs=50, batch_size=32, validation_split=0.2, verbose=0)
 
 # ---------------------------
-# Prediction Function for Gradio
+# Prediction function
 # ---------------------------
-def predict_quality(*features):
-    input_df = pd.DataFrame([features], columns=feature_names)
-    quality_pred = search.predict(input_df)[0]
-    return f"The predicted wine quality is: {quality_pred:.4f}"
+def predict_wine_quality(*features):
+    features = np.array(features).reshape(1, -1)
+    features_scaled = scaler.transform(features)
+    probs = model.predict(features_scaled, verbose=0)[0]
+    pred_class = classes[np.argmax(probs)]
+    confidence = np.max(probs)
+    return f"✅ Predicted Wine Quality: {pred_class} (Confidence: {confidence:.2f})"
 
 # ---------------------------
-# Login Validation
+# Login validation
 # ---------------------------
 def login(username, password):
     if username == "admin" and password == "1234":
@@ -113,20 +84,21 @@ with gr.Blocks() as demo:
     with gr.Row(visible=False) as app_page:
         with gr.Column():
             gr.Markdown("## 🍷 Wine Quality Prediction App")
-            
+
             inputs = []
-            with gr.Accordion("Enter Feature Values", open=True):
-                for col in feature_names:
+            with gr.Accordion("Enter Feature Values", open=False):
+                for col in df.drop("quality", axis=1).columns:
                     inputs.append(gr.Number(label=col, value=float(df[col].median())))
 
             btn = gr.Button("Predict Quality")
-            output_text = gr.Textbox(label="Predicted Quality")
+            output_text = gr.Textbox(label="Result")
 
-    # Button Actions
-    login_btn.click(fn=login, inputs=[username, password], outputs=[login_page, app_page])
-    btn.click(fn=predict_quality, inputs=inputs, outputs=output_text)
+    # Button actions
+    login_btn.click(fn=login, inputs=[username, password], outputs=[login_msg, app_page])
+    btn.click(fn=predict_wine_quality, inputs=inputs, outputs=output_text)
 
 # ---------------------------
 # Launch
 # ---------------------------
-demo.launch(share=False)
+if __name__ == "__main__":
+    demo.launch()
